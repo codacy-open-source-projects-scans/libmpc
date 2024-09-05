@@ -58,7 +58,7 @@ tan_im_cmp_one (mpc_srcptr op)
 
 /* special case where the real part of tan(op) underflows to 0:
    return 1 if 0 < Re(tan(op)) < 2^(emin-2),
-   -1 if -2^(emin-2) < Re(tan(op))| < 0, and 0 if we can't decide.
+   -1 if -2^(emin-2) < Re(tan(op)) < 0, and 0 if we can't decide.
    The real part is sin(2*x)/(cos(2*x) + cosh(2*y)) where op = (x,y),
    thus has the sign of sin(2*x).
 */
@@ -72,11 +72,11 @@ tan_re_cmp_zero (mpc_srcptr op, mpfr_exp_t emin)
   mpfr_mul_2exp (x, mpc_realref (op), 1, MPFR_RNDN);
   mpfr_init2 (s, 32);
   mpfr_init2 (c, 32);
-  mpfr_sin (s, x, MPFR_RNDA);
+  mpfr_sin (s, x, MPFR_RNDA); // use MPFR_RNDA to upper bound |sin(2x)|
   mpfr_mul_2exp (x, mpc_imagref (op), 1, MPFR_RNDN);
-  mpfr_cosh (c, x, MPFR_RNDZ);
-  mpfr_sub_ui (c, c, 1, MPFR_RNDZ);
-  mpfr_div (s, s, c, MPFR_RNDA);
+  mpfr_cosh (c, x, MPFR_RNDZ); // use MPFR_RNDZ to lower bound cosh(2x)
+  mpfr_sub_ui (c, c, 1, MPFR_RNDZ); // subtract 1 to lower bound cosh(2x) + cos(2x)
+  mpfr_div (s, s, c, MPFR_RNDA); // upper bound the ratio
   if (mpfr_zero_p (s) || mpfr_get_exp (s) <= emin - 2)
     ret = mpfr_sgn (s);
   mpfr_clear (s);
@@ -355,12 +355,12 @@ mpc_tan (mpc_ptr rop, mpc_srcptr op, mpc_rnd_t rnd)
              Since |tanh(2y)| = (1-exp(-4|y|))/(1+exp(-4|y|)),
              we have 1-|tanh(2y)| < 2*exp(-4|y|).
              Thus |im(z)-1| < 2/exp|2y| + 2/exp|4y| < 4/exp|2y| < 4/2^|2y|.
-             If 2^EXP(y) >= p+2, then im(z) rounds to -1 or 1. */
+             If |2y| >= p+3, then im(z) rounds to -1 or 1. */
+          mpfr_prec_t py = mpfr_get_prec (mpc_imagref (rop));
+          mpfr_exp_t ey = mpfr_get_exp (mpc_imagref (op));
           if (ok == 0 && (mpfr_cmp_ui (mpc_imagref(x), 1) == 0 ||
                           mpfr_cmp_si (mpc_imagref(x), -1) == 0) &&
-              mpfr_get_exp (mpc_imagref(op)) >= 0 &&
-              ((size_t) mpfr_get_exp (mpc_imagref(op)) >= 8 * sizeof (mpfr_prec_t) ||
-               ((mpfr_prec_t) 1) << mpfr_get_exp (mpc_imagref(op)) >= mpfr_get_prec (mpc_imagref (rop)) + 2))
+              mpfr_cmpabs_ui (mpc_imagref (op), py / 2 + 2) >= 0)
             {
               /* subtract one ulp, so that we get the correct inexact flag */
               ok = tan_im_cmp_one (op);
