@@ -117,63 +117,104 @@ mpc_log (mpc_ptr rop, mpc_srcptr op, mpc_rnd_t rnd){
 
    prec = MPC_PREC_RE(rop);
    mpfr_init2 (w, 2);
-   /* let op = x + iy; log = 1/2 log (x^2 + y^2) + i atan2 (y, x)   */
+   /* Let op = x + iy; log = 1/2 log (x^2 + y^2) + i atan2 (y, x)
+      Loop for the real part: 1/2 log (x^2 + y^2).
+      At precision p, this has a complexity of M(p)log(p) + O (M(p))
+      since it requires only one real logarithm, while the following,
+      alternative implementation uses two real logarithms with a complexity
+      of 2*M(p)log(p) + O (M(p)).
+      On the other hand, the computation of x^2 + y^2 may cause a spurious
+      overflow although the logarithm is always representable; this
+      explains the need for the later implementation.
+      Timings on a laptop yield the following time in s for the full
+      mpc_log function with x=\pi and y=e:
+               first     second implementation
+      p=10^3  0.000240   0.000211
+        10^4  0.002226   0.002451
+        10^5  0.074965   0.090478
+        10^6  2.000513   2.470727 */
+   ok = 0;
+   for (loop = 1; !ok && loop <= 2; loop++) {
+      prec += mpc_ceil_log2 (prec) + 4;
+      mpfr_set_prec (w, prec);
 
-   prec = MPC_PREC_RE(rop);
-   mpfr_init2 (v, 2);
-   /* compute 1/2 log (x^2 + y^2) = log |x| + 1/2 * log (1 + (y/x)^2)
-      if |x| >= |y|; otherwise, exchange x and y                   */
-   if (mpfr_cmpabs (mpc_realref (op), mpc_imagref (op)) >= 0) {
-     x = mpc_realref (op);
-     y = mpc_imagref (op);
+      mpc_abs (w, op, MPFR_RNDN);
+         /* error 0.5 ulp */
+      if (mpfr_inf_p (w))
+         /* intermediate overflow; the logarithm may be representable.
+            Intermediate underflow is impossible.                      */
+         break;
+
+      mpfr_log (w, w, MPFR_RNDN);
+         /* generic error of log: (2^(- exp(w)) + 0.5) ulp */
+
+      if (mpfr_zero_p (w))
+         /* impossible to round, switch to second algorithm */
+         break;
+
+      err = MPC_MAX (-mpfr_get_exp (w), 0) + 1;
+         /* number of lost digits */
+      ok = mpfr_can_round (w, prec - err, MPFR_RNDN, MPFR_RNDZ,
+         mpfr_get_prec (mpc_realref (rop)) + (MPC_RND_RE (rnd) == MPFR_RNDN));
    }
-   else {
-     x = mpc_imagref (op);
-     y = mpc_realref (op);
+
+   if (!ok) {
+      prec = MPC_PREC_RE(rop);
+      mpfr_init2 (v, 2);
+      /* compute 1/2 log (x^2 + y^2) = log |x| + 1/2 * log (1 + (y/x)^2)
+            if |x| >= |y|; otherwise, exchange x and y                   */
+      if (mpfr_cmpabs (mpc_realref (op), mpc_imagref (op)) >= 0) {
+         x = mpc_realref (op);
+         y = mpc_imagref (op);
+      }
+      else {
+         x = mpc_imagref (op);
+         y = mpc_realref (op);
+      }
+
+      loop = 0;
+      do {
+         MPC_LOOP_NEXT(loop, op, rop);
+         prec += (loop <= 2) ? mpc_ceil_log2 (prec) + 4 : prec / 2;
+         mpfr_set_prec (v, prec);
+         mpfr_set_prec (w, prec);
+
+         mpfr_div (v, y, x, MPFR_RNDD); /* error 1 ulp */
+         mpfr_sqr (v, v, MPFR_RNDD);
+            /* generic error of multiplication:
+               1 + 2*1*(2+1*2^(1-prec)) <= 5.0625 since prec >= 6 */
+         mpfr_log1p (v, v, MPFR_RNDD);
+            /* error 1 + 4*5.0625 = 21.25 , see algorithms.tex */
+         mpfr_div_2ui (v, v, 1, MPFR_RNDD);
+            /* If the result is 0, then there has been an underflow somewhere. */
+
+         mpfr_abs (w, x, MPFR_RNDN); /* exact */
+         mpfr_log (w, w, MPFR_RNDN); /* error 0.5 ulp */
+         expw = mpfr_get_exp (w);
+         sgnw = mpfr_signbit (w);
+
+         mpfr_add (w, w, v, MPFR_RNDN);
+         if (!sgnw) /* v is positive, so no cancellation;
+                       error 22.25 ulp; error counts lost bits */
+            err = 5;
+         else
+            err =   MPC_MAX (5 + mpfr_get_exp (v),
+                  /* 21.25 ulp (v) rewritten in ulp (result, now in w) */
+                           -1 + expw             - mpfr_get_exp (w)
+                  /* 0.5 ulp (previous w), rewritten in ulp (result) */
+                  ) + 2;
+
+         /* handle one special case: |x|=1, and (y/x)^2 underflows;
+            then 1/2*log(x^2+y^2) \approx 1/2*y^2 also underflows.  */
+         if (   (mpfr_cmp_si (x, -1) == 0 || mpfr_cmp_ui (x, 1) == 0)
+             && mpfr_zero_p (w))
+            underflow = 1;
+
+      } while (!underflow &&
+               !mpfr_can_round (w, prec - err, MPFR_RNDN, MPFR_RNDZ,
+               mpfr_get_prec (mpc_realref (rop)) + (MPC_RND_RE (rnd) == MPFR_RNDN)));
+      mpfr_clear (v);
    }
-
-   loop = 0;
-   do {
-     MPC_LOOP_NEXT(loop, op, rop);
-     prec += (loop <= 2) ? mpc_ceil_log2 (prec) + 4 : prec / 2;
-     mpfr_set_prec (v, prec);
-     mpfr_set_prec (w, prec);
-
-     mpfr_div (v, y, x, MPFR_RNDD); /* error 1 ulp */
-     mpfr_sqr (v, v, MPFR_RNDD);
-     /* generic error of multiplication:
-        1 + 2*1*(2+1*2^(1-prec)) <= 5.0625 since prec >= 6 */
-     mpfr_log1p (v, v, MPFR_RNDD);
-     /* error 1 + 4*5.0625 = 21.25 , see algorithms.tex */
-     mpfr_div_2ui (v, v, 1, MPFR_RNDD);
-     /* If the result is 0, then there has been an underflow somewhere. */
-
-     mpfr_abs (w, x, MPFR_RNDN); /* exact */
-     mpfr_log (w, w, MPFR_RNDN); /* error 0.5 ulp */
-     expw = mpfr_get_exp (w);
-     sgnw = mpfr_signbit (w);
-
-     mpfr_add (w, w, v, MPFR_RNDN);
-     if (!sgnw) /* v is positive, so no cancellation;
-                   error 22.25 ulp; error counts lost bits */
-       err = 5;
-     else
-       err =   MPC_MAX (5 + mpfr_get_exp (v),
-                        /* 21.25 ulp (v) rewritten in ulp (result, now in w) */
-                        -1 + expw             - mpfr_get_exp (w)
-                        /* 0.5 ulp (previous w), rewritten in ulp (result) */
-                        ) + 2;
-
-     /* handle one special case: |x|=1, and (y/x)^2 underflows;
-        then 1/2*log(x^2+y^2) \approx 1/2*y^2 also underflows.  */
-     if (   (mpfr_cmp_si (x, -1) == 0 || mpfr_cmp_ui (x, 1) == 0)
-            && mpfr_zero_p (w))
-       underflow = 1;
-
-   } while (!underflow &&
-            !mpfr_can_round (w, prec - err, MPFR_RNDN, MPFR_RNDZ,
-                             mpfr_get_prec (mpc_realref (rop)) + (MPC_RND_RE (rnd) == MPFR_RNDN)));
-   mpfr_clear (v);
 
    /* imaginary part */
    inex_im = mpfr_atan2 (mpc_imagref (rop), mpc_imagref (op), mpc_realref (op),
