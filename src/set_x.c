@@ -21,10 +21,6 @@ along with this program. If not, see http://www.gnu.org/licenses/ .
 
 #include "config.h"
 
-#ifdef HAVE_COMPLEX_H
-# include <complex.h>
-#endif
-
 #include "mpc-impl.h"
 
 #define MPC_SET_X(real_t, z, real_value, rnd)     \
@@ -77,7 +73,7 @@ mpc_set_sj (mpc_ptr a, intmax_t b, mpc_rnd_t rnd)
    MPC_SET_X (sj, a, b, rnd)
 #endif
 
-#ifdef HAVE_COMPLEX_H
+#ifdef _MPC_HAVE_COMPLEX_H
 int
 mpc_set_dc (mpc_ptr a, DOUBLE_COMPLEX b, mpc_rnd_t rnd) {
    return mpc_set_d_d (a, creal (b), cimag (b), rnd);
